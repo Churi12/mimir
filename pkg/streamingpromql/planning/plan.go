@@ -80,7 +80,10 @@ const QueryPlanV13 = QueryPlanVersion(13)
 // QueryPlanV14 introduces support for splitting a range query into smaller sub ranges.
 const QueryPlanV14 = QueryPlanVersion(14)
 
-var MaximumSupportedQueryPlanVersion = QueryPlanV14
+// QueryPlanV15 introduces support for caching the result of an instant vector operator.
+const QueryPlanV15 = QueryPlanVersion(15)
+
+var MaximumSupportedQueryPlanVersion = QueryPlanV15
 
 type QueryPlan struct {
 	Root       Node
