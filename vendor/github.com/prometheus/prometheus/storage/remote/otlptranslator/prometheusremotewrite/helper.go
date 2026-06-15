@@ -221,7 +221,7 @@ func (c *PrometheusConverter) recordLabelCollision(sortedLabels labels.Labels, f
 		}
 		fmt.Fprintf(&keys, "%q", l.Name)
 	})
-	c.collisionAnnots.Add(fmt.Errorf(
+	c.collisionAnnots.Add(newCategorizedWarning(WarningCategoryLabelNameCollision,
 		"OTLP attributes %s collide as label %q after name sanitization, values are concatenated with ';'",
 		keys.String(), finalKey))
 
