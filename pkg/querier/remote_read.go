@@ -364,11 +364,11 @@ func streamChunkedReadResponses(stream io.Writer, ss storage.ChunkSeriesSet, que
 				return 0, 0, errors.Errorf("found not populated chunk returned by SeriesSet at ref: %v", chk.Ref)
 			}
 
-			physicalSampleCount += uint64(chk.Chunk.NumSamples())
-			eqCount, err := equivalentSampleCountForChunk(chk.Chunk)
+			physicalCount, eqCount, err := sampleCountsForChunk(chk.Chunk)
 			if err != nil {
-				return 0, 0, errors.Wrap(err, "compute equivalent sample count")
+				return 0, 0, errors.Wrap(err, "compute sample counts")
 			}
+			physicalSampleCount += physicalCount
 			equivalentSampleCount += eqCount
 
 			// Cut the chunk.
@@ -412,37 +412,50 @@ func streamChunkedReadResponses(stream io.Writer, ss storage.ChunkSeriesSet, que
 	return physicalSampleCount, equivalentSampleCount, ss.Err()
 }
 
-// equivalentSampleCountForChunk returns the equivalent float sample count for a chunk.
-// Float chunks return NumSamples() directly. Histogram chunks only decode the first sample because all samples in
-// a chunk share the same bucket layout, we then multiply its cost by NumSamples() to get the total count.
-func equivalentSampleCountForChunk(chk chunkenc.Chunk) (uint64, error) {
-	enc := chk.Encoding()
-
-	if enc == chunkenc.EncXOR || enc == chunkenc.EncXOR2 {
-		return uint64(chk.NumSamples()), nil
-	}
-
-	numSamples := chk.NumSamples()
-	if numSamples == 0 {
-		return 0, nil
-	}
-
+// sampleCountsForChunk returns the non-stale physical and equivalent float sample counts for a chunk.
+func sampleCountsForChunk(chk chunkenc.Chunk) (uint64, uint64, error) {
 	it := chk.Iterator(nil)
+	var physicalSampleCount, equivalentSampleCount uint64
+	var histogramPerSampleCount uint64
+	haveHistogramPerSampleCount := false
 	for valType := it.Next(); valType != chunkenc.ValNone; valType = it.Next() {
-		var fh histogram.FloatHistogram
-		_, h := it.AtFloatHistogram(&fh)
-		// We skip stale/NaN values because their bucket layouts are empty, using them would result in undercounting (really
-		// just not counting at all).
-		if value.IsStaleNaN(h.Sum) {
-			continue
+		switch valType {
+		case chunkenc.ValFloat:
+			_, v := it.At()
+			if value.IsStaleNaN(v) {
+				continue
+			}
+			physicalSampleCount++
+			equivalentSampleCount++
+		case chunkenc.ValHistogram, chunkenc.ValFloatHistogram:
+			var fh histogram.FloatHistogram
+			_, h := it.AtFloatHistogram(&fh)
+			// We skip stale/NaN values because their bucket layouts are empty, using them would result in undercounting (really
+			// just not counting at all).
+			if value.IsStaleNaN(h.Sum) {
+				continue
+			}
+			// Histogram chunks share a bucket layout, so reuse the first non-stale sample's cost.
+			if !haveHistogramPerSampleCount {
+				histogramPerSampleCount = uint64(types.EquivalentFloatSampleCount(h))
+				haveHistogramPerSampleCount = true
+			}
+			physicalSampleCount++
+			equivalentSampleCount += histogramPerSampleCount
+		default:
+			return 0, 0, fmt.Errorf("unsupported value type: %v", valType)
 		}
-		perSample := types.EquivalentFloatSampleCount(h)
-		return uint64(perSample) * uint64(numSamples), nil
 	}
 	if err := it.Err(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return 0, nil
+	return physicalSampleCount, equivalentSampleCount, nil
+}
+
+// equivalentSampleCountForChunk returns the non-stale equivalent float sample count for a chunk.
+func equivalentSampleCountForChunk(chk chunkenc.Chunk) (uint64, error) {
+	_, equivalentSampleCount, err := sampleCountsForChunk(chk)
+	return equivalentSampleCount, err
 }
 
 func initializedFrameBytesRemaining(maxBytesInFrame int, lbls []prompb.Label) int {

@@ -550,6 +550,33 @@ func TestRemoteReadStreamedXORChunks_SampleCountStats(t *testing.T) {
 			expectedPhysicalSampleCount:   3,
 			expectedEquivalentSampleCount: 3,
 		},
+		"stale float samples not counted": {
+			queries: []*prompb.Query{
+				{StartTimestampMs: 0, EndTimestampMs: 10},
+			},
+			chunkSeriesSets: func() []storage.ChunkSeriesSet {
+				staleNaN := model.SampleValue(math.Float64frombits(value.StaleNaN))
+				return []storage.ChunkSeriesSet{
+					storage.NewSeriesSetToChunkSet(
+						series.NewConcreteSeriesSetFromUnsortedSeries([]storage.Series{
+							series.NewConcreteSeries(
+								labels.FromStrings("foo", "bar"),
+								[]model.SamplePair{
+									{Timestamp: 1, Value: 1},
+									{Timestamp: 2, Value: staleNaN},
+									{Timestamp: 3, Value: 3},
+									{Timestamp: 4, Value: staleNaN},
+									{Timestamp: 5, Value: 5},
+								},
+								nil,
+							),
+						}),
+					),
+				}
+			},
+			expectedPhysicalSampleCount:   3,
+			expectedEquivalentSampleCount: 3,
+		},
 		"single query with histogram samples": {
 			queries: []*prompb.Query{
 				{StartTimestampMs: 0, EndTimestampMs: 10},
@@ -1339,6 +1366,36 @@ func makeChunk(b *testing.B, encoding chunkenc.Encoding, n int) chunkenc.Chunk {
 
 func TestEquivalentSampleCountForChunk_StaleNaN(t *testing.T) {
 	staleSum := math.Float64frombits(value.StaleNaN)
+
+	t.Run("stale float samples return zero", func(t *testing.T) {
+		chk := chunkenc.NewXORChunk()
+		ap, err := chk.Appender()
+		require.NoError(t, err)
+
+		for i := 0; i < 3; i++ {
+			ap.Append(0, int64(i), staleSum)
+		}
+
+		require.Equal(t, 3, chk.NumSamples())
+		count, err := equivalentSampleCountForChunk(chk)
+		require.NoError(t, err)
+		require.Equal(t, uint64(0), count)
+	})
+
+	t.Run("mixed stale float samples count only non-stale samples", func(t *testing.T) {
+		chk := chunkenc.NewXORChunk()
+		ap, err := chk.Appender()
+		require.NoError(t, err)
+
+		ap.Append(0, 0, 1)
+		ap.Append(0, 1, staleSum)
+		ap.Append(0, 2, 3)
+
+		require.Equal(t, 3, chk.NumSamples())
+		count, err := equivalentSampleCountForChunk(chk)
+		require.NoError(t, err)
+		require.Equal(t, uint64(2), count)
+	})
 
 	t.Run("all stale float histogram samples return zero", func(t *testing.T) {
 		chk := chunkenc.NewFloatHistogramChunk()
