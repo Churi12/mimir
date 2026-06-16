@@ -363,6 +363,7 @@ func TestRemoteReadSamples_SampleCountStats(t *testing.T) {
 		h := test.GenerateTestHistogram(i)
 		return uint64(types.EquivalentFloatSampleCount(h.ToFloat(nil)))
 	}
+	staleValue := math.Float64frombits(value.StaleNaN)
 
 	tests := map[string]struct {
 		queries                       []*prompb.Query
@@ -428,6 +429,36 @@ func TestRemoteReadSamples_SampleCountStats(t *testing.T) {
 			},
 			expectedPhysicalSampleCount:   3,
 			expectedEquivalentSampleCount: 2 + equivalentCountForHistogram(3),
+		},
+		"stale samples are not counted": {
+			queries: []*prompb.Query{
+				{StartTimestampMs: 0, EndTimestampMs: 10},
+			},
+			seriesSets: func() []storage.SeriesSet {
+				staleHistogram := test.GenerateTestHistogram(3)
+				staleHistogram.Sum = staleValue
+				staleFloatHistogram := test.GenerateTestFloatHistogram(4)
+				staleFloatHistogram.Sum = staleValue
+
+				return []storage.SeriesSet{
+					series.NewConcreteSeriesSetFromUnsortedSeries([]storage.Series{
+						series.NewConcreteSeries(
+							labels.FromStrings("foo", "bar"),
+							[]model.SamplePair{
+								{Timestamp: 1, Value: 1},
+								{Timestamp: 2, Value: model.SampleValue(staleValue)},
+							},
+							[]mimirpb.Histogram{
+								mimirpb.FromHistogramToHistogramProto(3, staleHistogram),
+								mimirpb.FromFloatHistogramToHistogramProto(4, staleFloatHistogram),
+								mimirpb.FromHistogramToHistogramProto(5, test.GenerateTestHistogram(5)),
+							},
+						),
+					}),
+				}
+			},
+			expectedPhysicalSampleCount:   2,
+			expectedEquivalentSampleCount: 1 + equivalentCountForHistogram(5),
 		},
 		"multiple queries": {
 			queries: []*prompb.Query{
@@ -649,6 +680,48 @@ func TestRemoteReadStreamedXORChunks_SampleCountStats(t *testing.T) {
 			require.Equal(t, tc.expectedEquivalentSampleCount, queryStats.LoadEquivalentSamplesRead())
 		})
 	}
+}
+
+func TestRemoteReadStreamedXORChunks_RecordsSampleStatsBeforeStreamError(t *testing.T) {
+	chunkSeriesSets := []storage.ChunkSeriesSet{
+		storage.NewSeriesSetToChunkSet(
+			series.NewConcreteSeriesSetFromUnsortedSeries([]storage.Series{
+				series.NewConcreteSeries(
+					labels.FromStrings("foo", "bar"),
+					[]model.SamplePair{{Timestamp: 1, Value: 1}, {Timestamp: 2, Value: 2}},
+					nil,
+				),
+			}),
+		),
+		storage.ErrChunkSeriesSet(errors.New("stream failed")),
+	}
+	callCount := atomic.NewInt64(0)
+
+	q := &mockSampleAndChunkQueryable{
+		chunkQueryableFn: func(int64, int64) (storage.ChunkQuerier, error) {
+			return mockChunkQuerier{
+				selectFn: func(_ context.Context, _ bool, _ *storage.SelectHints, _ ...*labels.Matcher) storage.ChunkSeriesSet {
+					idx := callCount.Inc() - 1
+					return chunkSeriesSets[idx]
+				},
+			}, nil
+		},
+	}
+
+	queryStats, ctx := stats.ContextWithEmptyStats(context.Background())
+	w := httptest.NewRecorder()
+	req := &prompb.ReadRequest{
+		Queries: []*prompb.Query{
+			{StartTimestampMs: 0, EndTimestampMs: 10},
+			{StartTimestampMs: 0, EndTimestampMs: 10},
+		},
+		AcceptedResponseTypes: []prompb.ReadRequest_ResponseType{prompb.ReadRequest_STREAMED_XOR_CHUNKS},
+	}
+
+	remoteReadStreamedXORChunks(ctx, q, w, req, maxRemoteReadFrameBytes, 1, log.NewNopLogger())
+
+	require.Equal(t, uint64(2), queryStats.LoadPhysicalSamplesRead())
+	require.Equal(t, uint64(2), queryStats.LoadEquivalentSamplesRead())
 }
 
 type queryStartEnd struct {

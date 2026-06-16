@@ -216,7 +216,7 @@ func remoteReadStreamedXORChunks(
 	// We don't set the header because the http stdlib will automatically set it to 200 on the first Write().
 	// In case of an error, we will break the stream below.
 
-	var totalPhysicalSamples, totalEquivalentSamples uint64
+	queryStats := stats.FromContext(ctx)
 	for i, result := range results {
 		physicalCount, equivalentCount, err := streamChunkedReadResponses(
 			prom_remote.NewChunkedWriter(w, f),
@@ -224,6 +224,8 @@ func remoteReadStreamedXORChunks(
 			i,
 			maxBytesInFrame,
 		)
+		queryStats.AddPhysicalSamplesRead(physicalCount)
+		queryStats.AddEquivalentSamplesRead(equivalentCount)
 		if err != nil {
 			code := remoteReadErrorStatusCode(err)
 			if code/100 != 4 {
@@ -235,13 +237,7 @@ func remoteReadStreamedXORChunks(
 			http.Error(w, err.Error(), code)
 			return
 		}
-		totalPhysicalSamples += physicalCount
-		totalEquivalentSamples += equivalentCount
 	}
-
-	queryStats := stats.FromContext(ctx)
-	queryStats.AddPhysicalSamplesRead(totalPhysicalSamples)
-	queryStats.AddEquivalentSamplesRead(totalEquivalentSamples)
 }
 
 func remoteReadErrorStatusCode(err error) int {
@@ -284,18 +280,24 @@ func seriesSetToQueryResult(s storage.SeriesSet, filterStartMs, filterEndMs int6
 					Timestamp: t,
 					Value:     v,
 				})
-				physicalSampleCount++
-				equivalentSampleCount++
+				if !value.IsStaleNaN(v) {
+					physicalSampleCount++
+					equivalentSampleCount++
+				}
 			case chunkenc.ValHistogram:
 				t, h := it.AtHistogram(nil) // Nil argument as we pass the data to the protobuf as-is without copy.
 				histograms = append(histograms, prompb.FromIntHistogram(t, h))
-				physicalSampleCount++
-				equivalentSampleCount += uint64(types.EquivalentFloatSampleCount(h.ToFloat(nil)))
+				if !value.IsStaleNaN(h.Sum) {
+					physicalSampleCount++
+					equivalentSampleCount += uint64(types.EquivalentFloatSampleCount(h.ToFloat(nil)))
+				}
 			case chunkenc.ValFloatHistogram:
 				t, h := it.AtFloatHistogram(nil) // Nil argument as we pass the data to the protobuf as-is without copy.
 				histograms = append(histograms, prompb.FromFloatHistogram(t, h))
-				physicalSampleCount++
-				equivalentSampleCount += uint64(types.EquivalentFloatSampleCount(h))
+				if !value.IsStaleNaN(h.Sum) {
+					physicalSampleCount++
+					equivalentSampleCount += uint64(types.EquivalentFloatSampleCount(h))
+				}
 			default:
 				return nil, 0, 0, fmt.Errorf("unsupported value type: %v", valType)
 			}
