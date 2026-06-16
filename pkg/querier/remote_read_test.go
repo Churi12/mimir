@@ -523,6 +523,44 @@ func TestRemoteReadSamples_SampleCountStats(t *testing.T) {
 	}
 }
 
+func TestRemoteReadSamples_SampleCountStatsOnPartialError(t *testing.T) {
+	partialErr := errors.New("partial series set failure")
+	q := &mockSampleAndChunkQueryable{
+		queryableFn: func(int64, int64) (storage.Querier, error) {
+			return mockQuerier{
+				selectFn: func(_ context.Context, _ bool, _ *storage.SelectHints, _ ...*labels.Matcher) storage.SeriesSet {
+					return &partiallyFailingSeriesSet{
+						ss: series.NewConcreteSeriesSetFromUnsortedSeries([]storage.Series{
+							series.NewConcreteSeries(
+								labels.FromStrings("foo", "bar"),
+								[]model.SamplePair{{Timestamp: 1, Value: 1}, {Timestamp: 2, Value: 2}},
+								nil,
+							),
+							series.NewConcreteSeries(
+								labels.FromStrings("foo", "baz"),
+								[]model.SamplePair{{Timestamp: 3, Value: 3}},
+								nil,
+							),
+						}),
+						failAfter: 1,
+						err:       partialErr,
+					}
+				},
+			}, nil
+		},
+	}
+
+	queryStats, ctx := stats.ContextWithEmptyStats(context.Background())
+	w := httptest.NewRecorder()
+	req := &prompb.ReadRequest{Queries: []*prompb.Query{{StartTimestampMs: 0, EndTimestampMs: 10}}}
+
+	remoteReadSamples(ctx, q, w, req, 0, log.NewNopLogger())
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Equal(t, uint64(2), queryStats.LoadPhysicalSamplesRead())
+	require.Equal(t, uint64(2), queryStats.LoadEquivalentSamplesRead())
+}
+
 func TestRemoteReadStreamedXORChunks_SampleCountStats(t *testing.T) {
 	tests := map[string]struct {
 		queries                       []*prompb.Query

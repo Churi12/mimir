@@ -119,15 +119,14 @@ func remoteReadSamples(
 		// outside the queried range, so can filter them out.
 		var physicalSampleCount, equivalentSampleCount uint64
 		resp.Results[idx], physicalSampleCount, equivalentSampleCount, err = seriesSetToQueryResult(seriesSet, int64(minT), int64(maxT))
-		if err != nil {
-			return err
-		}
-
 		// Report stats incrementally so that already-processed queries are counted
-		// even if a later query errors or the client disconnects.
+		// even if this or a later query errors, or the client disconnects.
 		// The underlying stats methods are atomic, so concurrent calls are safe.
 		queryStats.AddPhysicalSamplesRead(physicalSampleCount)
 		queryStats.AddEquivalentSamplesRead(equivalentSampleCount)
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 
